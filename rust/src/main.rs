@@ -17,11 +17,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Manifest {
-        url: String,
+        mb_url: String,
         #[arg(long)]
         metadata: bool,
         #[arg(long)]
         mbid: bool,
+        #[arg(long)]
+        url: bool,
         #[arg(long)]
         torrent: String,
         #[arg(long, default_value = "flac,wav")]
@@ -44,8 +46,8 @@ enum CollectionCommands {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Manifest { url, metadata, mbid, torrent, tracks } => {
-            if let Err(e) = manifest::run(&url, metadata, mbid, &torrent, &tracks) {
+        Commands::Manifest { mb_url, metadata, mbid, url, torrent, tracks } => {
+            if let Err(e) = manifest::run(&mb_url, metadata, mbid, url, &torrent, &tracks) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

@@ -19,8 +19,8 @@ struct TrackData {
     musicbrainz_artistid: String,
 }
 
-pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str, tracks_filter: &str) -> Result<()> {
-    let raw_data = fetch_remote_metadata(url).context("Failed to fetch metadata from URL")?;
+pub fn run(mb_url: &str, use_metadata: bool, use_mbid: bool, use_url: bool, torrent_path_str: &str, tracks_filter: &str) -> Result<()> {
+    let raw_data = fetch_remote_metadata(mb_url).context("Failed to fetch metadata from URL")?;
     
     let torrent_path = Path::new(torrent_path_str).canonicalize()?;
     let current_dir = std::env::current_dir()?;
@@ -33,6 +33,20 @@ pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str
         anyhow::bail!("Failed to hash torrent file with nix");
     }
     let torrent_hash = String::from_utf8(output.stdout)?.trim().to_string();
+
+    let cover_file_path = Path::new("cover.png");
+    let cover_hash = if cover_file_path.exists() {
+        let out = Command::new("nix")
+            .args(["hash", "file", "cover.png"])
+            .output()?;
+        if out.status.success() {
+            String::from_utf8(out.stdout)?.trim().to_string()
+        } else {
+            "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()
+        }
+    } else {
+        "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()
+    };
 
     let torrent = Torrent::read_from_file(&torrent_path).context("Failed to parse torrent")?;
 
@@ -89,17 +103,13 @@ pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str
     if use_metadata {
         album_meta.insert("albumartist".to_string(), json!(album_artist));
         album_meta.insert("album".to_string(), json!(title));
-        
         let date_str = rg.get("first-release-date").and_then(|d| d.as_str()).unwrap_or("");
         album_meta.insert("date".to_string(), json!(if date_str.len() >= 4 { &date_str[..4] } else { "" }));
-
         if let Some(master) = dg.get("master") {
             if let Some(g) = master.get("genres") { album_meta.insert("genre".to_string(), g.clone()); }
             if let Some(s) = master.get("styles") { album_meta.insert("styles".to_string(), s.clone()); }
         }
-
         album_meta.insert("original_yyyy_mm".to_string(), json!(fmt_yyyy_mm(date_str)));
-
         if !is_rg {
             if let Some(release) = rel {
                 if let Some(c) = release.get("country").and_then(|c| c.as_str()) {
@@ -122,34 +132,33 @@ pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str
     }
 
     let mut album_mbid = Map::new();
-    if use_mbid {
+    let mut album_url_map = Map::new();
+    if use_mbid || use_url {
         if !is_rg {
             if let Some(id) = rel.and_then(|r| r.get("id")).and_then(|i| i.as_str()) {
-                album_mbid.insert("musicbrainz_release_url".to_string(), json!(format!("https://musicbrainz.org/release/{}", id)));
-                album_mbid.insert("musicbrainz_albumid".to_string(), json!(id));
+                if use_mbid { album_mbid.insert("musicbrainz_albumid".to_string(), json!(id)); }
+                if use_url { album_url_map.insert("musicbrainz_release".to_string(), json!(format!("https://musicbrainz.org/release/{}", id))); }
             }
         }
         if let Some(id) = rg.get("id").and_then(|i| i.as_str()) {
-            album_mbid.insert("musicbrainz_releasegroup_url".to_string(), json!(format!("https://musicbrainz.org/release-group/{}", id)));
-            album_mbid.insert("musicbrainz_releasegroupid".to_string(), json!(id));
+            if use_mbid { album_mbid.insert("musicbrainz_releasegroupid".to_string(), json!(id)); }
+            if use_url { album_url_map.insert("musicbrainz_releasegroup".to_string(), json!(format!("https://musicbrainz.org/release-group/{}", id))); }
         }
         if let Some(id) = rg.get("artist-credit").and_then(|a| a.as_array()).and_then(|a| a.first()).and_then(|c| c.get("artist")).and_then(|a| a.get("id")).and_then(|i| i.as_str()) {
-            album_mbid.insert("musicbrainz_albumartistid".to_string(), json!(id));
+            if use_mbid { album_mbid.insert("musicbrainz_albumartistid".to_string(), json!(id)); }
         }
-        
         if is_rg {
             if let Some(id) = dg.get("master").and_then(|m| m.get("id")) {
-                album_mbid.insert("discogs_url".to_string(), json!(format!("https://discogs.com/master/{}", id)));
+                if use_url { album_url_map.insert("discogs".to_string(), json!(format!("https://discogs.com/master/{}", id))); }
             }
         } else {
             if let Some(id) = dg.get("release").and_then(|r| r.get("id")) {
-                album_mbid.insert("discogs_url".to_string(), json!(format!("https://discogs.com/release/{}", id)));
+                if use_url { album_url_map.insert("discogs".to_string(), json!(format!("https://discogs.com/release/{}", id))); }
             }
         }
-
         if !is_rg {
             if let Some(ctdb) = get_ctdb_id(&PathBuf::from(".")) {
-                album_mbid.insert("ctdbid_url".to_string(), json!(format!("http://db.cuetools.net/?tocid={}", ctdb)));
+                if use_url { album_url_map.insert("ctdbtocid".to_string(), json!(format!("http://db.cuetools.net/?tocid={}", ctdb))); }
             }
         }
     }
@@ -167,12 +176,10 @@ pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str
                             let t_title = track.get("title").and_then(|t| t.as_str())
                                 .or_else(|| track.get("recording").and_then(|r| r.get("title")).and_then(|t| t.as_str())).unwrap_or("Untitled");
                             let t_artist = join_artists(track.get("artist-credit").or_else(|| track.get("recording").and_then(|r| r.get("artist-credit"))));
-                            
                             let mbid_t = track.get("recording").and_then(|r| r.get("id")).and_then(|i| i.as_str()).unwrap_or("");
                             let mbid_r = track.get("id").and_then(|i| i.as_str()).unwrap_or("");
                             let mbid_a = track.get("artist-credit").or_else(|| track.get("recording").and_then(|r| r.get("artist-credit")))
                                 .and_then(|a| a.as_array()).and_then(|a| a.first()).and_then(|c| c.get("artist")).and_then(|a| a.get("id")).and_then(|i| i.as_str()).unwrap_or("");
-
                             remote_tracks.push(TrackData {
                                 tracknumber: t_num,
                                 discnumber: disc_num,
@@ -204,81 +211,56 @@ pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str
         }
     }
 
-    let pname_base = if album_artist.is_empty() {
-        title.to_lowercase()
-    } else {
-        format!("{}-{}", album_artist.to_lowercase(), title.to_lowercase())
-    };
-
-    let sanitized_pname = pname_base
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let pname_base = if album_artist.is_empty() { title.to_lowercase() } else { format!("{}-{}", album_artist.to_lowercase(), title.to_lowercase()) };
+    let sanitized_pname = pname_base.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>().split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
 
     let mut out = String::new();
     let _ = writeln!(out, "{{ vellum }}:\n");
     let _ = writeln!(out, "vellum.mkAlbum {{\n");
     let _ = writeln!(out, "  pname = \"{sanitized_pname}\";\n");
+    let _ = writeln!(out, "  sourceDisk = {{");
+    let _ = writeln!(out, "    hash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";");
+    let _ = writeln!(out, "  }};\n");
     let _ = writeln!(out, "  sourceTorrent = {{");
     let _ = writeln!(out, "    file = {torrent_nix_path};");
     let _ = writeln!(out, "    hash = \"{torrent_hash}\";");
     let _ = writeln!(out, "  }};\n");
-    let _ = writeln!(out, "  sourceDisk.hash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";\n");
+    let _ = writeln!(out, "  cover = {{");
+    let _ = writeln!(out, "    file = ./cover.png;");
+    let _ = writeln!(out, "    hash = \"{cover_hash}\";");
+    let _ = writeln!(out, "  }};\n");
     let _ = writeln!(out, "  album = {{");
     let _ = writeln!(out, "    metadata = {{");
     let _ = write!(out, "{}", to_nix_attributes(&Value::Object(album_meta), "      "));
     let _ = writeln!(out, "    }};");
     let _ = writeln!(out, "    mbid = {{");
     let _ = write!(out, "{}", to_nix_attributes(&Value::Object(album_mbid), "      "));
+    let _ = writeln!(out, "    }};");
+    let _ = writeln!(out, "    url = {{");
+    let _ = write!(out, "{}", to_nix_attributes(&Value::Object(album_url_map), "      "));
     let _ = writeln!(out, "    }};\n  }};\n");
-
-    let _ = writeln!(out, "  cover = ./cover.png;\n");
-    let _ = writeln!(out, "  tracks =[");
-
+    let _ = writeln!(out, "  tracks = [");
     let total_count = std::cmp::max(valid_paths.len(), remote_tracks.len());
-
     for i in 0..total_count {
         let file_path = valid_paths.get(i).map_or_else(String::new, |path_buf| {
             let inner_path_str = path_buf.to_string_lossy();
-            if torrent.files.is_some() {
-                format!("{}/{}", torrent.name, inner_path_str)
-            } else {
-                inner_path_str.to_string()
-            }
+            if torrent.files.is_some() { format!("{}/{}", torrent.name, inner_path_str) } else { inner_path_str.to_string() }
         });
-
         let mut track_meta = Map::new();
         let mut track_mbid = Map::new();
-
         if let Some(t_data) = remote_tracks.get(i) {
             if use_metadata {
                 track_meta.insert("tracknumber".to_string(), json!(t_data.tracknumber));
-                if t_data.discnumber > 1 || remote_tracks.iter().any(|t| t.discnumber > 1) {
-                    track_meta.insert("discnumber".to_string(), json!(t_data.discnumber));
-                }
+                if t_data.discnumber > 1 || remote_tracks.iter().any(|t| t.discnumber > 1) { track_meta.insert("discnumber".to_string(), json!(t_data.discnumber)); }
                 track_meta.insert("title".to_string(), json!(t_data.title));
-                if !t_data.artist.is_empty() && t_data.artist != album_artist {
-                    track_meta.insert("artist".to_string(), json!(t_data.artist));
-                }
+                if !t_data.artist.is_empty() && t_data.artist != album_artist { track_meta.insert("artist".to_string(), json!(t_data.artist)); }
             }
-
             if use_mbid {
-                if !t_data.musicbrainz_trackid.is_empty() {
-                    track_mbid.insert("musicbrainz_trackid".to_string(), json!(t_data.musicbrainz_trackid));
-                }
-                if !t_data.musicbrainz_releasetrackid.is_empty() {
-                    track_mbid.insert("musicbrainz_releasetrackid".to_string(), json!(t_data.musicbrainz_releasetrackid));
-                }
-                if !t_data.musicbrainz_artistid.is_empty() {
-                    track_mbid.insert("musicbrainz_artistid".to_string(), json!(t_data.musicbrainz_artistid));
-                }
+                if !t_data.musicbrainz_trackid.is_empty() { track_mbid.insert("musicbrainz_trackid".to_string(), json!(t_data.musicbrainz_trackid)); }
+                if !t_data.musicbrainz_releasetrackid.is_empty() { track_mbid.insert("musicbrainz_releasetrackid".to_string(), json!(t_data.musicbrainz_releasetrackid)); }
+                if !t_data.musicbrainz_artistid.is_empty() { track_mbid.insert("musicbrainz_artistid".to_string(), json!(t_data.musicbrainz_artistid)); }
             }
         }
-
         let _ = writeln!(out, "    {{");
         let _ = writeln!(out, "      file = \"{file_path}\";");
         let _ = writeln!(out, "      metadata = {{");
@@ -288,17 +270,10 @@ pub fn run(url: &str, use_metadata: bool, use_mbid: bool, torrent_path_str: &str
         let _ = write!(out, "{}", to_nix_attributes(&Value::Object(track_mbid), "        "));
         let _ = writeln!(out, "      }};");
         let _ = write!(out, "    }}");
-        
-        if i < total_count - 1 {
-            let _ = writeln!(out, ",");
-        } else {
-            let _ = writeln!(out);
-        }
+        if i < total_count - 1 { let _ = writeln!(out, ","); } else { let _ = writeln!(out); }
     }
-
     let _ = writeln!(out, "  ];\n}}");
     println!("{out}");
-
     Ok(())
 }
 
