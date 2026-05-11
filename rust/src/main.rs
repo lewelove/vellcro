@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+mod collection;
+mod config;
 mod discid;
 mod manifest;
 mod remote;
@@ -26,6 +28,17 @@ enum Commands {
         tracks: String,
     },
     Discid,
+    Collection {
+        #[command(subcommand)]
+        command: CollectionCommands,
+    }
+}
+
+#[derive(Subcommand)]
+enum CollectionCommands {
+    Add {
+        url: String,
+    }
 }
 
 fn main() {
@@ -39,6 +52,14 @@ fn main() {
         }
         Commands::Discid => {
             discid::run();
+        }
+        Commands::Collection { command } => match command {
+            CollectionCommands::Add { url } => {
+                if let Err(e) = collection::run_add(&url) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }

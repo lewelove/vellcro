@@ -5,6 +5,19 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
+pub fn get_discogs_token() -> Option<String> {
+    let mut home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home_dir.push(".secrets/discogs.env");
+    let _ = dotenvy::from_filename(home_dir);
+
+    let token = std::env::var("DISCOGS_API_TOKEN").unwrap_or_default();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
 pub fn fetch_remote_metadata(url: &str) -> Option<Value> {
     let rg_regex = Regex::new(r"(release|release-group)/([a-f0-9\-]+)").unwrap();
     let caps = rg_regex.captures(url)?;
@@ -13,8 +26,8 @@ pub fn fetch_remote_metadata(url: &str) -> Option<Value> {
     let entity_id = caps.get(2)?.as_str();
     let is_rg = mode == "release-group";
 
-    let mut cache_dir = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
-    cache_dir.push("vellcro");
+    let config = crate::config::AppConfig::load();
+    let cache_dir = config.get_cache_dir();
     let _ = fs::create_dir_all(&cache_dir);
 
     let prefix = if is_rg { "rg" } else { "rel" };
@@ -69,14 +82,10 @@ pub fn fetch_remote_metadata(url: &str) -> Option<Value> {
 }
 
 fn get_discogs_data(client: &reqwest::blocking::Client, mb_obj: &Value) -> Value {
-    let mut home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home_dir.push(".secrets/discogs.env");
-    let _ = dotenvy::from_filename(home_dir);
-
-    let token = std::env::var("DISCOGS_API_TOKEN").unwrap_or_default();
-    if token.is_empty() {
-        return json!({ "error": "Missing token" });
-    }
+    let token = match get_discogs_token() {
+        Some(t) => t,
+        None => return json!({ "error": "Missing token" }),
+    };
 
     let mut discogs_url = String::new();
     if let Some(relations) = mb_obj.get("relations").and_then(|r| r.as_array()) {

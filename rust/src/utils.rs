@@ -1,5 +1,30 @@
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub fn expand_path(path_str: &str) -> PathBuf {
+    if path_str.starts_with('~') {
+        if let Some(home) = dirs::home_dir() {
+            if path_str == "~" {
+                return home;
+            }
+            if let Some(stripped) = path_str.strip_prefix("~/") {
+                return home.join(stripped);
+            }
+        }
+    }
+    PathBuf::from(path_str)
+}
+
+pub fn sanitize_filename(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
 
 pub fn get_sort_key(filepath: &Path) -> (u8, u32, String) {
     if let Ok(tag) = metaflac::Tag::read_from_path(filepath) {
