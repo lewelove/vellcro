@@ -28,18 +28,18 @@ pub fn run_add(url: &str) -> Result<()> {
     }
 
     let entity_type = if is_master { "master" } else { "release" };
-    let id = url.split('/').last().unwrap_or("").split('-').next().unwrap_or("");
+    let id = url.split('/').next_back().unwrap_or("").split('-').next().unwrap_or("");
     if id.is_empty() {
         anyhow::bail!("Could not extract ID from URL");
     }
 
     let api_url = if is_master {
-        format!("https://api.discogs.com/masters/{}", id)
+        format!("https://api.discogs.com/masters/{id}")
     } else {
-        format!("https://api.discogs.com/releases/{}", id)
+        format!("https://api.discogs.com/releases/{id}")
     };
 
-    let auth_header = format!("Discogs token={}", token);
+    let auth_header = format!("Discogs token={token}");
     let resp: Value = client
         .get(&api_url)
         .header("Authorization", &auth_header)
@@ -62,9 +62,9 @@ pub fn run_add(url: &str) -> Result<()> {
         .unwrap_or("Unknown Album");
 
     let mut cover_hash_str = String::new();
-    if let Some(images) = resp.get("images").and_then(|i| i.as_array()) {
-        if let Some(img) = images.first() {
-            if let Some(img_url) = img.get("resource_url").and_then(|u| u.as_str()) {
+    if let Some(images) = resp.get("images").and_then(|i| i.as_array())
+        && let Some(img) = images.first()
+            && let Some(img_url) = img.get("resource_url").and_then(|u| u.as_str()) {
                 let img_bytes = client
                     .get(img_url)
                     .header("Authorization", &auth_header)
@@ -85,12 +85,10 @@ pub fn run_add(url: &str) -> Result<()> {
                     let cache_dir = config.get_cache_dir();
                     let covers_dir = cache_dir.join("covers");
                     let _ = fs::create_dir_all(&covers_dir);
-                    let cover_path = covers_dir.join(format!("{}.png", cover_hash_str));
+                    let cover_path = covers_dir.join(format!("{cover_hash_str}.png"));
                     let _ = dyn_img.save_with_format(&cover_path, image::ImageFormat::Png);
                 }
             }
-        }
-    }
 
     let now = Utc::now();
     let nanos = now.timestamp_nanos_opt().unwrap_or(0);
@@ -107,7 +105,7 @@ pub fn run_add(url: &str) -> Result<()> {
 
     let safe_artist = crate::utils::sanitize_filename(artist);
     let safe_title = crate::utils::sanitize_filename(title);
-    let filename = format!("{}-{}.json", safe_artist, safe_title);
+    let filename = format!("{safe_artist}-{safe_title}.json");
     let file_path = collection_folder.join(filename);
 
     let content = serde_json::to_string_pretty(&json_obj)?;

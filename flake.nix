@@ -13,11 +13,13 @@
 
         build-cli = pkgs.writeShellApplication {
           name = "build";
-          runtimeInputs = [ pkgs.cargo pkgs.rustc pkgs.git ];
+          runtimeInputs = [ pkgs.cargo pkgs.rustc pkgs.git pkgs.clippy ];
           text = ''
             ROOT=$(git rev-parse --show-toplevel)
             cd "$ROOT/rust"
             
+            cargo clippy -- -D warnings
+
             if [ "''${1:-}" = "--release" ]; then
               cargo build --release
             else

@@ -48,7 +48,7 @@ fn main() {
     match cli.command {
         Commands::Manifest { mb_url, metadata, mbid, url, torrent, tracks } => {
             if let Err(e) = manifest::run(&mb_url, metadata, mbid, url, &torrent, &tracks) {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
@@ -58,7 +58,7 @@ fn main() {
         Commands::Collection { command } => match command {
             CollectionCommands::Add { url } => {
                 if let Err(e) = collection::run_add(&url) {
-                    eprintln!("Error: {}", e);
+                    eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
             }

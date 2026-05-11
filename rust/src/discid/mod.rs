@@ -3,6 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 use sha1::{Digest, Sha1};
+use std::fmt::Write;
 
 pub fn get_total_samples(filepath: &Path) -> Result<u64, String> {
     let tag = metaflac::Tag::read_from_path(filepath).map_err(|e| e.to_string())?;
@@ -15,7 +16,7 @@ pub fn get_ctdb_id(folder_path: &Path) -> Option<String> {
     let mut files: Vec<PathBuf> = fs::read_dir(folder_path)
         .into_iter()
         .flatten()
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("flac"))
         .collect();
@@ -55,9 +56,9 @@ pub fn get_ctdb_id(folder_path: &Path) -> Option<String> {
 
     let mut x = String::new();
     for offset in offsets.iter().skip(1) {
-        x.push_str(&format!("{:08X}", offset - pregap));
+        let _ = write!(x, "{:08X}", offset - pregap);
     }
-    x.push_str(&format!("{:08X}", leadout - pregap));
+    let _ = write!(x, "{:08X}", leadout - pregap);
 
     while x.len() < 800 {
         x.push('0');
@@ -78,7 +79,7 @@ pub fn get_ctdb_id(folder_path: &Path) -> Option<String> {
 
 pub fn run() {
     if let Some(ctdb) = get_ctdb_id(&PathBuf::from(".")) {
-        println!("https://db.cuetools.net/?tocid={}", ctdb);
+        println!("https://db.cuetools.net/?tocid={ctdb}");
     } else {
         std::process::exit(1);
     }
