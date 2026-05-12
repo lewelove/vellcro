@@ -2,6 +2,10 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+fn default_flag() -> String {
+    "metadata".to_string()
+}
+
 #[derive(Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -16,7 +20,6 @@ pub struct StorageConfig {
     pub cache: Option<String>,
 }
 
-
 #[derive(Deserialize, Default)]
 pub struct CollectionConfig {
     pub folder: String,
@@ -24,14 +27,14 @@ pub struct CollectionConfig {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct ManifestConfig {
-    pub metadata: Option<IndexMap<String, ManifestKeyConfig>>,
-    pub mbid: Option<IndexMap<String, ManifestKeyConfig>>,
-    pub url: Option<IndexMap<String, ManifestKeyConfig>>,
+    pub keys: Option<IndexMap<String, ManifestKeyConfig>>,
 }
 
 #[derive(Deserialize, Default, Clone)]
 pub struct ManifestKeyConfig {
     pub level: String,
+    #[serde(default = "default_flag")]
+    pub flag: String,
     #[serde(default)]
     pub newline: bool,
 }

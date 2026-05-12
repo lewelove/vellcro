@@ -43,18 +43,14 @@ struct ManifestParams<'a> {
     remote_tracks: &'a [TrackData],
     album_ctx: &'a keys::AlbumContext<'a>,
     manifest_cfg: &'a ManifestConfig,
-    use_metadata: bool,
-    use_mbid: bool,
-    use_url: bool,
+    active_flags: &'a [String],
     album_artist: &'a str,
     title: &'a str,
 }
 
 pub fn run(
     mb_url: &str,
-    use_metadata: bool,
-    use_mbid: bool,
-    use_url: bool,
+    flags: Option<&str>,
     torrent: Option<&str>,
     disk: Option<&str>,
     tracks_filter: &str,
@@ -122,6 +118,17 @@ pub fn run(
         album_artist: &album_artist,
     };
 
+    let active_flags: Vec<String> = flags.map_or_else(
+        || vec!["metadata".to_string()],
+        |f_str| {
+            f_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        },
+    );
+
     let out = generate_nix_manifest(&ManifestParams {
         source_type,
         cover_hash: &cover_hash,
@@ -129,9 +136,7 @@ pub fn run(
         remote_tracks: &remote_tracks,
         album_ctx: &album_ctx,
         manifest_cfg: &manifest_cfg,
-        use_metadata,
-        use_mbid,
-        use_url,
+        active_flags: &active_flags,
         album_artist: &album_artist,
         title,
     });
@@ -313,9 +318,13 @@ fn extract_remote_tracks(rel: Option<&Value>, dg: &Value, is_rg: bool) -> Vec<Tr
     remote_tracks
 }
 
-fn has_keys_for_level(map: Option<&IndexMap<String, ManifestKeyConfig>>, target_level: &str) -> bool {
+fn has_keys_for_level_and_flag(map: Option<&IndexMap<String, ManifestKeyConfig>>, target_level: &str, target_flag: &str) -> bool {
     let Some(map) = map else { return false; };
-    map.values().any(|cfg| cfg.level == target_level || cfg.level == format!("{target_level}s"))
+    map.values().any(|cfg| {
+        let lvl_match = cfg.level == target_level || cfg.level == format!("{target_level}s");
+        let flag_match = cfg.flag == target_flag;
+        lvl_match && flag_match
+    })
 }
 
 fn generate_nix_manifest(params: &ManifestParams) -> String {
@@ -332,14 +341,6 @@ fn generate_nix_manifest(params: &ManifestParams) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-
-    let has_album_meta = params.use_metadata && has_keys_for_level(params.manifest_cfg.metadata.as_ref(), "album");
-    let has_album_mbid = params.use_mbid && has_keys_for_level(params.manifest_cfg.mbid.as_ref(), "album");
-    let has_album_url = params.use_url && has_keys_for_level(params.manifest_cfg.url.as_ref(), "album");
-
-    let has_track_meta = params.use_metadata && has_keys_for_level(params.manifest_cfg.metadata.as_ref(), "track");
-    let has_track_mbid = params.use_mbid && has_keys_for_level(params.manifest_cfg.mbid.as_ref(), "track");
-    let has_track_url = params.use_url && has_keys_for_level(params.manifest_cfg.url.as_ref(), "track");
 
     let mut out = String::new();
     let _ = writeln!(out, "{{ vellum }}:\n");
@@ -371,20 +372,12 @@ fn generate_nix_manifest(params: &ManifestParams) -> String {
 
     let _ = writeln!(out, "  album = {{");
 
-    if has_album_meta {
-        let _ = writeln!(out, "    metadata = {{");
-        render_section(params.manifest_cfg.metadata.as_ref(), "album", Some(params.album_ctx), None, "      ", &mut out);
-        let _ = writeln!(out, "    }};");
-    }
-    if has_album_mbid {
-        let _ = writeln!(out, "    mbid = {{");
-        render_section(params.manifest_cfg.mbid.as_ref(), "album", Some(params.album_ctx), None, "      ", &mut out);
-        let _ = writeln!(out, "    }};");
-    }
-    if has_album_url {
-        let _ = writeln!(out, "    url = {{");
-        render_section(params.manifest_cfg.url.as_ref(), "album", Some(params.album_ctx), None, "      ", &mut out);
-        let _ = writeln!(out, "    }};");
+    for flag in params.active_flags {
+        if has_keys_for_level_and_flag(params.manifest_cfg.keys.as_ref(), "album", flag) {
+            let _ = writeln!(out, "    {flag} = {{");
+            render_section(params.manifest_cfg.keys.as_ref(), "album", flag, Some(params.album_ctx), None, "      ", &mut out);
+            let _ = writeln!(out, "    }};");
+        }
     }
 
     let _ = writeln!(out, "  }};\n");
@@ -406,25 +399,19 @@ fn generate_nix_manifest(params: &ManifestParams) -> String {
                 album_artist: params.album_artist,
             };
 
-            if has_track_meta {
-                let _ = writeln!(out, "      metadata = {{");
-                render_section(params.manifest_cfg.metadata.as_ref(), "track", None, Some(&t_ctx), "        ", &mut out);
-                let _ = writeln!(out, "      }};");
-            }
-            if has_track_mbid {
-                let _ = writeln!(out, "      mbid = {{");
-                render_section(params.manifest_cfg.mbid.as_ref(), "track", None, Some(&t_ctx), "        ", &mut out);
-                let _ = writeln!(out, "      }};");
-            }
-            if has_track_url {
-                let _ = writeln!(out, "      url = {{");
-                render_section(params.manifest_cfg.url.as_ref(), "track", None, Some(&t_ctx), "        ", &mut out);
-                let _ = writeln!(out, "      }};");
+            for flag in params.active_flags {
+                if has_keys_for_level_and_flag(params.manifest_cfg.keys.as_ref(), "track", flag) {
+                    let _ = writeln!(out, "      {flag} = {{");
+                    render_section(params.manifest_cfg.keys.as_ref(), "track", flag, None, Some(&t_ctx), "        ", &mut out);
+                    let _ = writeln!(out, "      }};");
+                }
             }
         } else {
-            if has_track_meta { let _ = writeln!(out, "      metadata = {{}};"); }
-            if has_track_mbid { let _ = writeln!(out, "      mbid = {{}};"); }
-            if has_track_url { let _ = writeln!(out, "      url = {{}};"); }
+            for flag in params.active_flags {
+                if has_keys_for_level_and_flag(params.manifest_cfg.keys.as_ref(), "track", flag) {
+                    let _ = writeln!(out, "      {flag} = {{}};");
+                }
+            }
         }
 
         let _ = writeln!(out, "    }}");
@@ -436,6 +423,7 @@ fn generate_nix_manifest(params: &ManifestParams) -> String {
 fn render_section(
     map: Option<&IndexMap<String, ManifestKeyConfig>>,
     target_level: &str,
+    target_flag: &str,
     album_ctx: Option<&keys::AlbumContext>,
     track_ctx: Option<&keys::TrackContext>,
     indent: &str,
@@ -443,7 +431,10 @@ fn render_section(
 ) {
     let Some(map) = map else { return; };
     for (key, cfg) in map {
-        if cfg.level == target_level || cfg.level == format!("{target_level}s") {
+        let lvl_match = cfg.level == target_level || cfg.level == format!("{target_level}s");
+        let flag_match = cfg.flag == target_flag;
+
+        if lvl_match && flag_match {
             let val = album_ctx.map_or_else(
                 || track_ctx.and_then(|ctx| keys::resolve_track_key(key, ctx)),
                 |ctx| keys::resolve_album_key(key, ctx)

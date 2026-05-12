@@ -19,11 +19,7 @@ enum Commands {
     Manifest {
         mb_url: String,
         #[arg(long)]
-        metadata: bool,
-        #[arg(long)]
-        mbid: bool,
-        #[arg(long)]
-        url: bool,
+        flags: Option<String>,
         #[arg(long, conflicts_with = "disk")]
         torrent: Option<String>,
         #[arg(
@@ -56,8 +52,8 @@ enum CollectionCommands {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Manifest { mb_url, metadata, mbid, url, torrent, disk, tracks } => {
-            if let Err(e) = manifest::run(&mb_url, metadata, mbid, url, torrent.as_deref(), disk.as_deref(), &tracks) {
+        Commands::Manifest { mb_url, flags, torrent, disk, tracks } => {
+            if let Err(e) = manifest::run(&mb_url, flags.as_deref(), torrent.as_deref(), disk.as_deref(), &tracks) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
