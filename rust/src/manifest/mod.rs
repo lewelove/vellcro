@@ -14,6 +14,8 @@ use crate::discid::get_ctdb_id;
 use crate::remote::fetch_remote_metadata;
 use crate::utils::join_artists;
 
+const FAKE_HASH: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
 pub struct TrackData {
     pub tracknumber: u32,
     pub discnumber: u32,
@@ -24,13 +26,20 @@ pub struct TrackData {
     pub musicbrainz_artistid: String,
 }
 
-#[derive(Clone, Copy)]
+pub enum SourceType {
+    Torrent {
+        nix_path: String,
+        hash: String,
+    },
+    Disk {
+        nix_path: String,
+    },
+}
+
 struct ManifestParams<'a> {
-    torrent: &'a Torrent,
-    torrent_hash: &'a str,
-    torrent_nix_path: &'a str,
+    source_type: SourceType,
     cover_hash: &'a str,
-    valid_paths: &'a [PathBuf],
+    valid_paths: &'a [String],
     remote_tracks: &'a [TrackData],
     album_ctx: &'a keys::AlbumContext<'a>,
     manifest_cfg: &'a ManifestConfig,
@@ -46,16 +55,49 @@ pub fn run(
     use_metadata: bool,
     use_mbid: bool,
     use_url: bool,
-    torrent_path_str: &str,
+    torrent: Option<&str>,
+    disk: Option<&str>,
     tracks_filter: &str,
 ) -> Result<()> {
     let config = AppConfig::load();
     let manifest_cfg = config.manifest.unwrap_or_default();
 
     let raw_data = fetch_remote_metadata(mb_url).context("Failed to fetch metadata from URL")?;
-    let (torrent, torrent_hash, rel_torrent) = process_torrent(torrent_path_str)?;
-    let valid_paths = match_files(&torrent, tracks_filter)?;
     let cover_hash = hash_cover_file()?;
+
+    let (source_type, valid_paths, base_dir_for_ctdb) = if let Some(t_path) = torrent {
+        let (torrent_struct, torrent_hash, rel_torrent) = process_torrent(t_path)?;
+        let paths = match_torrent_files(&torrent_struct, tracks_filter)?;
+        let nix_path = if rel_torrent.is_absolute() {
+            format!("\"{}\"", rel_torrent.to_string_lossy())
+        } else {
+            format!("./{}", rel_torrent.to_string_lossy())
+        };
+        (SourceType::Torrent { nix_path, hash: torrent_hash }, paths, PathBuf::from("."))
+    } else {
+        let d_path_str = disk.unwrap_or(".");
+        let d_path = Path::new(d_path_str).canonicalize()?;
+        let current_dir = std::env::current_dir()?;
+
+        let rel_disk = d_path
+            .strip_prefix(&current_dir)
+            .map_or_else(|_| d_path.clone(), Path::to_path_buf);
+
+        let disk_nix_path = if rel_disk.is_absolute() {
+            format!("\"{}\"", rel_disk.to_string_lossy())
+        } else {
+            let s = rel_disk.to_string_lossy();
+            if s.is_empty() {
+                "./.".to_string()
+            } else {
+                format!("./{s}")
+            }
+        };
+
+        let paths = match_disk_files(&d_path, tracks_filter)?;
+
+        (SourceType::Disk { nix_path: disk_nix_path }, paths, d_path)
+    };
 
     let is_rg = raw_data.get("_is_rg").and_then(serde_json::Value::as_bool).unwrap_or(false);
     let mb = raw_data.get("musicbrainz").context("Missing musicbrainz data")?;
@@ -69,7 +111,7 @@ pub fn run(
 
     let remote_tracks = extract_remote_tracks(rel, dg, is_rg);
 
-    let ctdb = if !is_rg { get_ctdb_id(&PathBuf::from(".")) } else { None };
+    let ctdb = if !is_rg { get_ctdb_id(&base_dir_for_ctdb) } else { None };
     
     let album_ctx = keys::AlbumContext {
         rg,
@@ -80,16 +122,8 @@ pub fn run(
         album_artist: &album_artist,
     };
 
-    let torrent_nix_path = if rel_torrent.is_absolute() {
-        format!("\"{}\"", rel_torrent.to_string_lossy())
-    } else {
-        format!("./{}", rel_torrent.to_string_lossy())
-    };
-
-    let out = generate_nix_manifest(ManifestParams {
-        torrent: &torrent,
-        torrent_hash: &torrent_hash,
-        torrent_nix_path: &torrent_nix_path,
+    let out = generate_nix_manifest(&ManifestParams {
+        source_type,
         cover_hash: &cover_hash,
         valid_paths: &valid_paths,
         remote_tracks: &remote_tracks,
@@ -127,7 +161,7 @@ fn process_torrent(torrent_path_str: &str) -> Result<(Torrent, String, PathBuf)>
     Ok((torrent, torrent_hash, rel_torrent))
 }
 
-fn match_files(torrent: &Torrent, tracks_filter: &str) -> Result<Vec<PathBuf>> {
+fn build_globset(tracks_filter: &str) -> Result<globset::GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for part in tracks_filter.split(',') {
         let trimmed = part.trim();
@@ -141,23 +175,45 @@ fn match_files(torrent: &Torrent, tracks_filter: &str) -> Result<Vec<PathBuf>> {
         };
         builder.add(Glob::new(&pattern)?);
     }
-    let globset = builder.build()?;
+    Ok(builder.build()?)
+}
 
+fn match_torrent_files(torrent: &Torrent, tracks_filter: &str) -> Result<Vec<String>> {
+    let globset = build_globset(tracks_filter)?;
     let mut valid_paths = Vec::new();
     if let Some(files) = &torrent.files {
         for f in files {
-            let path_buf = f.path.clone();
-            if globset.is_match(path_buf.to_string_lossy().as_ref()) {
-                valid_paths.push(path_buf);
+            if globset.is_match(f.path.to_string_lossy().as_ref()) {
+                valid_paths.push(format!("{}/{}", torrent.name, f.path.to_string_lossy()));
             }
         }
     } else {
         let name_str = &torrent.name;
         if globset.is_match(name_str) {
-            valid_paths.push(Path::new(name_str).to_path_buf());
+            valid_paths.push(name_str.clone());
         }
     }
-    valid_paths.sort_by(|a, b| alphanumeric_sort::compare_path(a, b));
+    valid_paths.sort_by(|a, b| alphanumeric_sort::compare_path(Path::new(a), Path::new(b)));
+    Ok(valid_paths)
+}
+
+fn match_disk_files(disk_path: &Path, tracks_filter: &str) -> Result<Vec<String>> {
+    let globset = build_globset(tracks_filter)?;
+    let mut valid_paths = Vec::new();
+    if disk_path.is_file() {
+        let name = disk_path.file_name().unwrap_or_default().to_string_lossy();
+        if globset.is_match(name.as_ref()) {
+            valid_paths.push(name.to_string());
+        }
+    } else {
+        for f in crate::utils::walk_dir(disk_path, disk_path)? {
+            let s = f.to_string_lossy();
+            if globset.is_match(s.as_ref()) {
+                valid_paths.push(s.to_string());
+            }
+        }
+    }
+    valid_paths.sort_by(|a, b| alphanumeric_sort::compare_path(Path::new(a), Path::new(b)));
     Ok(valid_paths)
 }
 
@@ -170,10 +226,10 @@ fn hash_cover_file() -> Result<String> {
         if out.status.success() {
             String::from_utf8(out.stdout)?.trim().to_string()
         } else {
-            "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()
+            FAKE_HASH.to_string()
         }
     } else {
-        "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()
+        FAKE_HASH.to_string()
     };
     Ok(cover_hash)
 }
@@ -262,7 +318,7 @@ fn has_keys_for_level(map: Option<&IndexMap<String, ManifestKeyConfig>>, target_
     map.values().any(|cfg| cfg.level == target_level || cfg.level == format!("{target_level}s"))
 }
 
-fn generate_nix_manifest(params: ManifestParams) -> String {
+fn generate_nix_manifest(params: &ManifestParams) -> String {
     let pname_base = if params.album_artist.is_empty() {
         params.title.to_lowercase()
     } else {
@@ -289,13 +345,25 @@ fn generate_nix_manifest(params: ManifestParams) -> String {
     let _ = writeln!(out, "{{ vellum }}:\n");
     let _ = writeln!(out, "vellum.mkAlbum {{\n");
     let _ = writeln!(out, "  pname = \"{sanitized_pname}\";\n");
-    let _ = writeln!(out, "  sourceDisk = {{");
-    let _ = writeln!(out, "    hash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";");
-    let _ = writeln!(out, "  }};\n");
-    let _ = writeln!(out, "  sourceTorrent = {{");
-    let _ = writeln!(out, "    file = {};", params.torrent_nix_path);
-    let _ = writeln!(out, "    hash = \"{}\";", params.torrent_hash);
-    let _ = writeln!(out, "  }};\n");
+
+    match &params.source_type {
+        SourceType::Disk { nix_path } => {
+            let _ = writeln!(out, "  sourceDisk = {{");
+            let _ = writeln!(out, "    file = {nix_path};");
+            let _ = writeln!(out, "    hash = \"{FAKE_HASH}\";");
+            let _ = writeln!(out, "  }};\n");
+        }
+        SourceType::Torrent { nix_path, hash } => {
+            let _ = writeln!(out, "  sourceDisk = {{");
+            let _ = writeln!(out, "    hash = \"{FAKE_HASH}\";");
+            let _ = writeln!(out, "  }};\n");
+            let _ = writeln!(out, "  sourceTorrent = {{");
+            let _ = writeln!(out, "    file = {nix_path};");
+            let _ = writeln!(out, "    hash = \"{hash}\";");
+            let _ = writeln!(out, "  }};\n");
+        }
+    }
+
     let _ = writeln!(out, "  cover = {{");
     let _ = writeln!(out, "    file = ./cover.png;");
     let _ = writeln!(out, "    hash = \"{}\";", params.cover_hash);
@@ -326,14 +394,7 @@ fn generate_nix_manifest(params: ManifestParams) -> String {
     let has_multiple_discs = params.remote_tracks.iter().any(|t| t.discnumber > 1);
 
     for i in 0..total_count {
-        let file_path = params.valid_paths.get(i).map_or_else(String::new, |path_buf| {
-            let inner_path_str = path_buf.to_string_lossy();
-            if params.torrent.files.is_some() {
-                format!("{}/{}", params.torrent.name, inner_path_str)
-            } else {
-                inner_path_str.to_string()
-            }
-        });
+        let file_path = params.valid_paths.get(i).cloned().unwrap_or_default();
 
         let _ = writeln!(out, "    {{");
         let _ = writeln!(out, "      file = \"{file_path}\";");

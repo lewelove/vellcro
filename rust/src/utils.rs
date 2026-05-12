@@ -56,3 +56,19 @@ pub fn fmt_yyyy_mm(date_str: &str) -> String {
     if date_str.len() == 4 { return format!("{date_str}-00"); }
     date_str.to_string()
 }
+
+pub fn walk_dir(root: &Path, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                entries.extend(walk_dir(root, &path)?);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                entries.push(rel.to_path_buf());
+            }
+        }
+    }
+    Ok(entries)
+}
